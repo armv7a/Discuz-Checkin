@@ -1,0 +1,39 @@
+name: Auto Checkin Daily
+
+on:
+  schedule:
+    # 每天 UTC+8 早上 8:00 到 8:10 之间执行
+    # 对应 UTC 时间 00:00 到 00:10
+    - cron: '0-10 0 * * *'
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  qd:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.x'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+    - name: Create config file from base64 secret
+      run: |
+        echo "${{ secrets.CONFIG_BASE64 }}" | base64 -d > config.yaml
+      
+    - name: Run qd.py
+      run: |
+        python qd.py
+
+    - name: Clean up config file
+      if: always()
+      run: |
+        rm -f config.yaml
