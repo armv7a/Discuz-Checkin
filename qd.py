@@ -135,16 +135,19 @@ def load_config(config_path):
                 "  - name: \"站点1名称\"\n"
                 "    url: \"https://example1.com\"\n"
                 "    auth:\n"
-                "      cookies:\n"
-                "        - \"xxx=yyy;mmm=nnn\"\n"
+                "      accounts:\n"
+                "        - cookies: \"xxx=yyy;mmm=nnn\"\n"
+                "          # formhash: \"abc123\"  # 可选：自定义 formhash，如果自动获取失败可手动设置\n"
+                "        - cookies: \"aaa=bbb;ccc=ddd\"\n"
+                "          formhash: \"def456\"  # 为特定账号设置固定 formhash\n"
                 "    options:\n"
                 "      rotate_accounts: true\n"
                 "      timeout: 15\n\n"
                 "  - name: \"站点2名称\"\n"
                 "    url: \"https://example2.com\"\n"
                 "    auth:\n"
-                "      cookies:\n"
-                "        - \"aaa=bbb;ccc=ddd\"\n"
+                "      accounts:\n"
+                "        - cookies: \"eee=fff;ggg=hhh\"\n"
                 "    options:\n"
                 "      rotate_accounts: true\n"
                 "      timeout: 15\n\n"
@@ -165,14 +168,17 @@ def load_config(config_path):
     if "sites" in config:
         sites_config = config.get("sites", [])
     else:
+        # 兼容旧版配置格式
         base_url = config.get("site", {}).get("url", "").rstrip("/")
         cookie_list = config.get("auth", {}).get("cookies", [])
         options = config.get("options", {})
         if base_url and cookie_list:
+            # 将旧格式转换为新格式
+            accounts = [{"cookies": cookie} for cookie in cookie_list]
             sites_config = [{
                 "name": "默认站点",
                 "url": base_url,
-                "auth": {"cookies": cookie_list},
+                "auth": {"accounts": accounts},
                 "options": options
             }]
 
@@ -186,24 +192,50 @@ def load_config(config_path):
     validated_sites = []
     for site in sites_config:
         base_url = site.get("url", "").rstrip("/")
-        cookie_list = site.get("auth", {}).get("cookies", [])
+        auth_config = site.get("auth", {})
+        
+        # 支持两种格式：accounts 列表或 cookies 列表（兼容旧版）
+        if "accounts" in auth_config:
+            accounts = auth_config["accounts"]
+        elif "cookies" in auth_config:
+            # 兼容旧版：将 cookies 列表转换为 accounts 列表
+            accounts = [{"cookies": cookie} for cookie in auth_config["cookies"]]
+        else:
+            accounts = []
+            
         options = site.get("options", {})
         site_name = site.get("name", "未命名站点")
         
         if not base_url:
             log(f"站点 '{site_name}' 的 url 为空，已跳过", level="ERROR")
             continue
-        if not cookie_list:
-            log(f"站点 '{site_name}' 的 cookies 为空，已跳过", level="ERROR")
+        if not accounts:
+            log(f"站点 '{site_name}' 的 accounts 为空，已跳过", level="ERROR")
             continue
         
+        validated_accounts = []
+        for account in accounts:
+            cookies = account.get("cookies", "")
+            formhash = account.get("formhash", "")  # 获取自定义 formhash
+            if not cookies:
+                log(f"站点 '{site_name}' 中发现空的 cookies，已跳过该账号", level="WARN")
+                continue
+            validated_accounts.append({
+                "cookies": cookies,
+                "formhash": formhash
+            })
+        
+        if not validated_accounts:
+            log(f"站点 '{site_name}' 没有有效的账号配置，已跳过", level="ERROR")
+            continue
+            
         validated_sites.append({
             "name": site_name,
             "url": base_url,
-            "cookies": cookie_list,
+            "accounts": validated_accounts,
             "options": options
         })
-        log(f"站点配置加载成功: {site_name} - {len(cookie_list)} 个账号", level="INFO")
+        log(f"站点配置加载成功: {site_name} - {len(validated_accounts)} 个账号", level="INFO")
 
     if not validated_sites:
         log("没有有效的站点配置", level="FATAL")
@@ -271,8 +303,13 @@ def fetch_continuous_days(base_url, cookies, headers, timeout):
         log(f"访问签到页失败: {e}", level="ERROR")
         return None
 
-def sign_account(base_url, cookie_str, timeout, account_num, site_name):
+def sign_account(base_url, account_config, timeout, account_num, site_name):
+    cookie_str = account_config["cookies"]
+    custom_formhash = account_config.get("formhash", "")
+    
     print(f"\n🎯 开始处理站点 '{site_name}' 的第 {account_num} 个账号...")
+    if custom_formhash:
+        print(f"📝 使用自定义 formhash: {mask_sensitive_data(custom_formhash)}")
     
     cookies = parse_cookie(cookie_str)
     headers = {
@@ -286,12 +323,17 @@ def sign_account(base_url, cookie_str, timeout, account_num, site_name):
         "Connection": "keep-alive",
     }
 
-    try:
-        formhash = fetch_formhash(base_url, cookies, headers, timeout)
-    except Exception as e:
-        msg = f"第 {account_num} 个账号 formhash 获取失败: {e}"
-        log(msg, level="ERROR")
-        return msg
+    # 优先使用自定义 formhash，如果未设置则自动获取
+    if custom_formhash:
+        formhash = custom_formhash
+        log(f"使用自定义 formhash: {mask_sensitive_data(formhash)}", level="INFO")
+    else:
+        try:
+            formhash = fetch_formhash(base_url, cookies, headers, timeout)
+        except Exception as e:
+            msg = f"第 {account_num} 个账号 formhash 获取失败: {e}"
+            log(msg, level="ERROR")
+            return msg
 
     url = f"{base_url}/k_misign-sign.html?operation=qiandao&format=button&formhash={formhash}"
     log(f"发送签到请求", level="INFO")
@@ -333,21 +375,21 @@ def sign_account(base_url, cookie_str, timeout, account_num, site_name):
 def sign_site(site_config):
     site_name = site_config["name"]
     base_url = site_config["url"]
-    cookie_list = site_config["cookies"]
+    account_list = site_config["accounts"]
     options = site_config["options"]
     timeout = options.get("timeout", 15)
     
     print(f"\n{'='*60}")
     print(f"🏠 开始处理站点: {site_name}")
     print(f"🌐 论坛地址: {base_url}")
-    print(f"📋 账号数量: {len(cookie_list)}")
+    print(f"📋 账号数量: {len(account_list)}")
     print(f"{'='*60}")
     
     results = []
-    for idx, cookie_str in enumerate(cookie_list, 1):
-        result = sign_account(base_url, cookie_str, timeout, idx, site_name)
+    for idx, account_config in enumerate(account_list, 1):
+        result = sign_account(base_url, account_config, timeout, idx, site_name)
         results.append(result)
-        if options.get("rotate_accounts", True) and idx < len(cookie_list):
+        if options.get("rotate_accounts", True) and idx < len(account_list):
             print("⏳ 等待 2 秒后处理下一个账号...")
             time.sleep(2)
     
@@ -378,7 +420,7 @@ def main():
     
     for site_config in sites_config:
         site_name = site_config["name"]
-        total_accounts += len(site_config["cookies"])
+        total_accounts += len(site_config["accounts"])
         
         try:
             results = sign_site(site_config)
